@@ -41,18 +41,15 @@ def init_db():
     cursor = conn.cursor()
     # Drop old students table if exists to recreate with new schema (for migration; in prod, use ALTER)
     cursor.execute("DROP TABLE IF EXISTS students")
-    cursor.execute("DROP TABLE IF EXISTS attendance")
-    cursor.execute("DROP TABLE IF EXISTS results")
-    cursor.execute("DROP TABLE IF EXISTS fees")
     tables = [
         ("users", "username TEXT PRIMARY KEY, password TEXT NOT NULL, role TEXT NOT NULL"),
-        ("students", "first_name TEXT PRIMARY KEY, middle_name TEXT, surname TEXT NOT NULL, class TEXT NOT NULL, dob DATE NOT NULL, gender TEXT NOT NULL, residence TEXT NOT NULL, guardian_name TEXT, guardian_phone TEXT, insurance_number TEXT, registration_date DATE DEFAULT CURRENT_DATE, has_medical_condition BOOLEAN DEFAULT 0, medical_details TEXT, passport_picture_path TEXT"),
+        ("students", "id INTEGER PRIMARY KEY, first_name TEXT NOT NULL, middle_name TEXT, surname TEXT NOT NULL, class TEXT NOT NULL, dob DATE NOT NULL, gender TEXT NOT NULL, residence TEXT NOT NULL, guardian_name TEXT, guardian_phone TEXT, insurance_number TEXT, registration_date DATE DEFAULT CURRENT_DATE, has_medical_condition BOOLEAN DEFAULT 0, medical_details TEXT, passport_picture_path TEXT"),
         ("teachers", "id INTEGER PRIMARY KEY, name TEXT NOT NULL, subject TEXT NOT NULL, email TEXT NOT NULL, phone TEXT NOT NULL"),
         ("non_teaching", "id INTEGER PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, email TEXT NOT NULL, phone TEXT NOT NULL"),
-        ("attendance", "date DATE NOT NULL, student_first_name TEXT NOT NULL, present BOOLEAN NOT NULL, PRIMARY KEY (date, student_first_name), FOREIGN KEY (student_first_name) REFERENCES students(first_name)"),
-        ("results", "student_first_name TEXT NOT NULL, subject TEXT NOT NULL, score INTEGER NOT NULL, PRIMARY KEY (student_first_name, subject), FOREIGN KEY (student_first_name) REFERENCES students(first_name)"),
+        ("attendance", "date DATE NOT NULL, student_id INTEGER NOT NULL, present BOOLEAN NOT NULL, PRIMARY KEY (date, student_id), FOREIGN KEY (student_id) REFERENCES students(id)"),
+        ("results", "student_id INTEGER NOT NULL, subject TEXT NOT NULL, score INTEGER NOT NULL, PRIMARY KEY (student_id, subject), FOREIGN KEY (student_id) REFERENCES students(id)"),
         ("salary", "teacher_id INTEGER NOT NULL, month TEXT NOT NULL, amount REAL NOT NULL, paid BOOLEAN NOT NULL, PRIMARY KEY (teacher_id, month), FOREIGN KEY (teacher_id) REFERENCES teachers(id)"),
-        ("fees", "class TEXT NOT NULL, fee_amount REAL NOT NULL, student_first_name TEXT, paid_amount REAL DEFAULT 0, date_paid DATE, collected_by TEXT, PRIMARY KEY (class, student_first_name), FOREIGN KEY (student_first_name) REFERENCES students(first_name)"),
+        ("fees", "class TEXT NOT NULL, fee_amount REAL NOT NULL, student_id INTEGER, paid_amount REAL DEFAULT 0, date_paid DATE, collected_by TEXT, PRIMARY KEY (class, student_id), FOREIGN KEY (student_id) REFERENCES students(id)"),
         ("reports", "teacher_id INTEGER NOT NULL, report_content TEXT NOT NULL, date DATE NOT NULL, PRIMARY KEY (teacher_id, date), FOREIGN KEY (teacher_id) REFERENCES teachers(id)"),
         ("register", "teacher_id INTEGER NOT NULL, class TEXT NOT NULL, date DATE NOT NULL, marked BOOLEAN NOT NULL, PRIMARY KEY (teacher_id, class, date), FOREIGN KEY (teacher_id) REFERENCES teachers(id)"),
         ("class_teachers", "class TEXT NOT NULL, teacher_id INTEGER NOT NULL, PRIMARY KEY (class, teacher_id), FOREIGN KEY (teacher_id) REFERENCES teachers(id)"),
@@ -87,8 +84,6 @@ def load_data(table):
         return df
     except: return pd.DataFrame()
 def generate_id(table):
-    if table == 'students':
-        return None  # No longer needed
     try:
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
@@ -122,17 +117,16 @@ def search_profiles(search_query):
     student_results = pd.DataFrame()
     teacher_results = pd.DataFrame()
    
-    # For students, search by exact first_name or contains full_name
-    if not students.empty:
-        if search_query in students['first_name'].values:
-            student_results = students[students['first_name'] == search_query][['first_name', 'full_name', 'class', 'dob', 'gender', 'residence']]
-        else:
-            student_results = students[students['full_name'].str.contains(search_query, case=False, na=False)][['first_name', 'full_name', 'class', 'dob', 'gender', 'residence']]
-    if not teachers.empty:
-        try:
-            search_id = int(search_query)
+    try:
+        search_id = int(search_query)
+        if not students.empty:
+            student_results = students[students['id'] == search_id][['id', 'full_name', 'class', 'dob', 'gender', 'residence']]
+        if not teachers.empty:
             teacher_results = teachers[teachers['id'] == search_id][['id', 'name', 'subject', 'email', 'phone']]
-        except ValueError:
+    except ValueError:
+        if not students.empty:
+            student_results = students[students['full_name'].str.contains(search_query, case=False, na=False)][['id', 'full_name', 'class', 'dob', 'gender', 'residence']]
+        if not teachers.empty:
             teacher_results = teachers[teachers['name'].str.contains(search_query, case=False, na=False)][['id', 'name', 'subject', 'email', 'phone']]
    
     return student_results, teacher_results
@@ -478,9 +472,9 @@ def main():
             teachers = load_data('teachers')
             fees = load_data('fees')
             collected = fees['paid_amount'].sum() if 'paid_amount' in fees.columns and not fees.empty else 0
-            arrears = (fees['fee_amount'] - fees['paid_amount'].fillna(0)).sum() if 'fee_amount' in fees.columns and 'paid_amount' in fees.columns and not fees.empty else 0
+            arrears = (fees['fee_amount'] - fees['paid_amount']).sum() if 'fee_amount' in fees.columns and 'paid_amount' in fees.columns and not fees.empty else 0
             st.markdown('<div class="search-bar-container">', unsafe_allow_html=True)
-            search_query = st.text_input("Search Student or Teacher (First Name or Name)", key="dashboard_search")
+            search_query = st.text_input("Search Student or Teacher (ID or Name)", key="dashboard_search")
             if st.button("Search", key="dashboard_search_btn"):
                 if search_query:
                     student_results, teacher_results = search_profiles(search_query)
@@ -798,7 +792,8 @@ def admin_students():
         uploaded_file = st.file_uploader("Upload Passport Picture (JPG/PNG)", type=['jpg', 'jpeg', 'png'], key="add_photo")
         photo_path = None
         if uploaded_file is not None:
-            photo_filename = f"{first_name.strip()}.{uploaded_file.name.split('.')[-1]}"
+            new_id = generate_id('students')
+            photo_filename = f"{new_id}.{uploaded_file.name.split('.')[-1]}"
             photo_path = os.path.join(PHOTO_FOLDER, photo_filename)
             with open(photo_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
@@ -814,55 +809,52 @@ def admin_students():
             elif insurance_number and not is_valid_insurance_number(insurance_number): st.error("Invalid insurance number")
             elif has_medical and not medical_details.strip(): st.error("Medical details required if condition exists")
             else:
-                students = load_data('students')
-                if first_name.strip() in students['first_name'].values:
-                    st.error("First name already exists (must be unique)")
-                else:
-                    conn = sqlite3.connect(DATABASE)
-                    cursor = conn.cursor()
-                    reg_date = datetime.now().date()
-                    cursor.execute("""
-                        INSERT INTO students
-                        (first_name, middle_name, surname, class, dob, gender, residence, guardian_name, guardian_phone,
-                         insurance_number, registration_date, has_medical_condition, medical_details, passport_picture_path)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (first_name.strip(), middle_name.strip() if middle_name else None, surname.strip(),
-                          class_.strip(), dob, gender, residence.strip(), guardian_name.strip() if guardian_name else None,
-                          guardian_phone.strip() if guardian_phone else None, insurance_number.strip() if insurance_number else None,
-                          reg_date, 1 if has_medical else 0, medical_details.strip() if has_medical else None, photo_path))
-                    # Auto-create fee row
-                    class_fee_data = load_data('fees')
-                    class_fee_row = class_fee_data[class_fee_data['class'] == class_]
-                    fee_amount = class_fee_row['fee_amount'].values[0] if not class_fee_row.empty else 0.0
-                    cursor.execute("INSERT INTO fees (class, fee_amount, student_first_name, paid_amount) VALUES (?, ?, ?, ?)",
-                                   (class_.strip(), fee_amount, first_name.strip(), 0.0))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Student {first_name} {surname} added")
+                conn = sqlite3.connect(DATABASE)
+                cursor = conn.cursor()
+                new_id = generate_id('students')
+                reg_date = datetime.now().date()
+                cursor.execute("""
+                    INSERT INTO students
+                    (id, first_name, middle_name, surname, class, dob, gender, residence, guardian_name, guardian_phone,
+                     insurance_number, registration_date, has_medical_condition, medical_details, passport_picture_path)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (new_id, first_name.strip(), middle_name.strip() if middle_name else None, surname.strip(),
+                      class_.strip(), dob, gender, residence.strip(), guardian_name.strip() if guardian_name else None,
+                      guardian_phone.strip() if guardian_phone else None, insurance_number.strip() if insurance_number else None,
+                      reg_date, 1 if has_medical else 0, medical_details.strip() if has_medical else None, photo_path))
+                # Auto-create fee row
+                class_fee_data = load_data('fees')
+                class_fee_row = class_fee_data[class_fee_data['class'] == class_]
+                fee_amount = class_fee_row['fee_amount'].values[0] if not class_fee_row.empty else 0.0
+                cursor.execute("INSERT INTO fees (class, fee_amount, student_id, paid_amount) VALUES (?, ?, ?, ?)",
+                               (class_.strip(), fee_amount, new_id, 0.0))
+                conn.commit()
+                conn.close()
+                st.success(f"Student {first_name} {surname} added with ID {new_id}")
     with tab2:
-        student_first_name = st.text_input("Student First Name", key="delete_student_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="delete_student_id")
         if st.button("Delete", key="delete_student_button"):
             students = load_data('students')
-            if student_first_name not in students['first_name'].values:
+            if student_id not in students['id'].values:
                 st.error("Student not found")
             else:
                 # Delete photo if exists
-                student = students[students['first_name'] == student_first_name].iloc[0]
+                student = students[students['id'] == student_id].iloc[0]
                 if student['passport_picture_path'] and os.path.exists(student['passport_picture_path']):
                     os.remove(student['passport_picture_path'])
                 conn = sqlite3.connect(DATABASE)
                 cursor = conn.cursor()
-                cursor.execute("DELETE FROM students WHERE first_name = ?", (student_first_name,))
+                cursor.execute("DELETE FROM students WHERE id = ?", (student_id,))
                 conn.commit()
                 conn.close()
                 st.success("Student deleted")
     with tab3:
         st.markdown("<h3 style='color:#ffd700;'>Update Student Profile</h3>", unsafe_allow_html=True)
-        old_first_name = st.text_input("Student First Name (for selection)", key="update_student_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="update_student_id")
         students = load_data('students')
-        if old_first_name in students['first_name'].values:
-            s = students[students['first_name'] == old_first_name].iloc[0]
-            new_first_name = st.text_input("First Name", value=s['first_name'], key="update_first_name")
+        if student_id in students['id'].values:
+            s = students[students['id'] == student_id].iloc[0]
+            first_name = st.text_input("First Name", value=s['first_name'], key="update_first_name")
             middle_name = st.text_input("Middle Name", value=s['middle_name'] if pd.notna(s['middle_name']) else "", key="update_middle_name")
             surname = st.text_input("Surname", value=s['surname'], key="update_surname")
             class_ = st.text_input("Class", value=s['class'], key="update_class")
@@ -880,24 +872,13 @@ def admin_students():
                 st.image(current_photo, caption="Current Photo", width=100)
             uploaded_file = st.file_uploader("Update Passport Picture (JPG/PNG)", type=['jpg', 'jpeg', 'png'], key="update_photo")
             new_photo_path = current_photo
-            rename_photo = False
             if uploaded_file is not None:
-                ext = uploaded_file.name.split('.')[-1]
-                new_photo_path = os.path.join(PHOTO_FOLDER, f"{new_first_name.strip()}.{ext}")
+                new_photo_path = os.path.join(PHOTO_FOLDER, f"{student_id}.{uploaded_file.name.split('.')[-1]}")
                 with open(new_photo_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 st.success("Photo updated")
-                rename_photo = True if current_photo and new_first_name != old_first_name else False
-            elif new_first_name != old_first_name and current_photo:
-                # Rename existing photo if first_name changes
-                ext = os.path.basename(current_photo).split('.')[-1]
-                new_photo_path = os.path.join(PHOTO_FOLDER, f"{new_first_name.strip()}.{ext}")
-                os.rename(current_photo, new_photo_path)
-                rename_photo = True
             if st.button("Update", key="update_student_button"):
-                if not is_valid_name_part(new_first_name): st.error("Invalid first name")
-                elif new_first_name != old_first_name and new_first_name in students['first_name'].values:
-                    st.error("New first name already exists")
+                if not is_valid_name_part(first_name): st.error("Invalid first name")
                 elif not is_valid_name_part(surname): st.error("Invalid surname")
                 elif not is_valid_class(class_): st.error("Invalid class")
                 elif not is_valid_date(dob): st.error("Invalid DOB")
@@ -913,50 +894,45 @@ def admin_students():
                         UPDATE students SET first_name=?, middle_name=?, surname=?, class=?, dob=?, gender=?,
                         residence=?, guardian_name=?, guardian_phone=?, insurance_number=?,
                         has_medical_condition=?, medical_details=?, passport_picture_path=?
-                        WHERE first_name=?
-                    """, (new_first_name.strip(), middle_name.strip() if middle_name else None, surname.strip(),
+                        WHERE id=?
+                    """, (first_name.strip(), middle_name.strip() if middle_name else None, surname.strip(),
                           class_.strip(), dob, gender, residence.strip(),
                           guardian_name.strip() if guardian_name else None,
                           guardian_phone.strip() if guardian_phone else None,
                           insurance_number.strip() if insurance_number else None,
                           1 if has_medical else 0, medical_details.strip() if has_medical else None,
-                          new_photo_path, old_first_name))
-                    # Update foreign keys in other tables if first_name changed
-                    if new_first_name != old_first_name:
-                        cursor.execute("UPDATE attendance SET student_first_name=? WHERE student_first_name=?", (new_first_name.strip(), old_first_name))
-                        cursor.execute("UPDATE results SET student_first_name=? WHERE student_first_name=?", (new_first_name.strip(), old_first_name))
-                        cursor.execute("UPDATE fees SET student_first_name=? WHERE student_first_name=?", (new_first_name.strip(), old_first_name))
+                          new_photo_path, student_id))
                     conn.commit()
                     conn.close()
                     st.success("Student updated")
         else:
-            st.warning("Student First Name not found")
+            st.warning("Student ID not found")
     with tab4:
-        student_first_name = st.text_input("Student First Name", key="check_attendance_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="check_attendance_id")
         if st.button("Check", key="check_attendance_button"):
             att = load_data('attendance')
-            filtered = att[att['student_first_name'] == student_first_name]
+            filtered = att[att['student_id'] == student_id]
             st.dataframe(filtered) if not filtered.empty else st.info("No records")
     with tab5:
-        student_first_name = st.text_input("Student First Name", key="check_results_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="check_results_id")
         if st.button("Check", key="check_results_button"):
             res = load_data('results')
-            filtered = res[res['student_first_name'] == student_first_name]
+            filtered = res[res['student_id'] == student_id]
             st.dataframe(filtered) if not filtered.empty else st.info("No results")
     with tab6:
-        student_first_name = st.text_input("Student First Name", key="report_card_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="report_card_id")
         if st.button("Generate", key="generate_report_button"):
-            results_df = load_data('results')
-            attendance_df = load_data('attendance')
-            student_df = load_data('students')
-            if student_first_name in student_df['first_name'].values:
-                s = student_df[student_df['first_name'] == student_first_name].iloc[0]
+            results = load_data('results')
+            attendance = load_data('attendance')
+            student = load_data('students')
+            if student_id in student['id'].values:
+                s = student[student['id'] == student_id].iloc[0]
                 report = f"Report Card for {s['full_name']}\nClass: {s['class']}\nGuardian: {s['guardian_name']}\nInsurance: {s['insurance_number']}\nMedical: {s['has_medical_condition']} - {s['medical_details']}\n\nResults:\n"
-                res = results_df[results_df['student_first_name'] == student_first_name]
+                res = results[results['student_id'] == student_id]
                 report += res.to_string(index=False) + "\n\nAttendance:\n"
-                att = attendance_df[attendance_df['student_first_name'] == student_first_name]
+                att = attendance[attendance['student_id'] == student_id]
                 report += att.to_string(index=False)
-                st.download_button("Download", report, f"report_{student_first_name}.txt", key="download_report")
+                st.download_button("Download", report, f"report_{student_id}.txt", key="download_report")
 # === ADMIN: STAFF ===
 def admin_staff():
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -970,7 +946,7 @@ def admin_staff():
         phone = st.text_input("Phone", key="add_teacher_phone")
         if st.button("Add", key="add_teacher_button"):
             conn = sqlite3.connect(DATABASE)
-            if not is_valid_name_part(name): st.error("Invalid name")
+            if not is_valid_name(name): st.error("Invalid name")
             elif not is_valid_subject(subject): st.error("Invalid subject")
             elif not is_valid_email(email): st.error("Invalid email")
             elif not is_valid_phone(phone): st.error("Invalid phone")
@@ -1035,29 +1011,29 @@ def admin_staff():
 def admin_fees():
     tab1, tab2, tab3, tab4 = st.tabs(["Payment", "Setup", "Records", "Report"])
     with tab1:
-        student_first_name = st.text_input("Student First Name", key="fees_student_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="fees_student_id")
         amount = st.number_input("Amount", min_value=0.0, step=0.01, key="fees_amount")
         collected_by = st.text_input("Collected By", key="fees_collected_by")
         if st.button("Record", key="record_payment_button"):
             students = load_data('students')
-            if student_first_name not in students['first_name'].values:
+            if student_id not in students['id'].values:
                 st.error("Student not found")
             else:
-                class_ = students[students['first_name'] == student_first_name]['class'].values[0]
+                class_ = students[students['id'] == student_id]['class'].values[0]
                 fees_data = load_data('fees')
-                fee_row = fees_data[(fees_data['class'] == class_) & (fees_data['student_first_name'] == student_first_name)]
+                fee_row = fees_data[(fees_data['class'] == class_) & (fees_data['student_id'] == student_id)]
                 conn = sqlite3.connect(DATABASE)
                 cursor = conn.cursor()
                 if fee_row.empty:
                     # Create row if not exists
-                    class_fee = fees_data[(fees_data['class'] == class_) & fees_data['student_first_name'].isna()]
+                    class_fee = fees_data[(fees_data['class'] == class_) & fees_data['student_id'].isna()]
                     fee_amount = class_fee['fee_amount'].values[0] if not class_fee.empty else 0
-                    cursor.execute("INSERT INTO fees (class, fee_amount, student_first_name, paid_amount, date_paid, collected_by) VALUES (?, ?, ?, ?, ?, ?)",
-                                   (class_, fee_amount, student_first_name, amount, datetime.now().date(), collected_by))
+                    cursor.execute("INSERT INTO fees (class, fee_amount, student_id, paid_amount, date_paid, collected_by) VALUES (?, ?, ?, ?, ?, ?)",
+                                   (class_, fee_amount, student_id, amount, datetime.now().date(), collected_by))
                 else:
                     current_paid = fee_row['paid_amount'].values[0]
-                    cursor.execute("UPDATE fees SET paid_amount = paid_amount + ?, date_paid = ?, collected_by = ? WHERE student_first_name = ? AND class = ?",
-                                   (amount, datetime.now().date(), collected_by, student_first_name, class_))
+                    cursor.execute("UPDATE fees SET paid_amount = paid_amount + ?, date_paid = ?, collected_by = ? WHERE student_id = ? AND class = ?",
+                                   (amount, datetime.now().date(), collected_by, student_id, class_))
                 conn.commit()
                 conn.close()
                 st.success("Payment recorded")
@@ -1067,7 +1043,7 @@ def admin_fees():
         if st.button("Set", key="set_fee_button"):
             conn = sqlite3.connect(DATABASE)
             cursor = conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO fees (class, fee_amount, student_first_name) VALUES (?, ?, NULL)", (class_, fee))
+            cursor.execute("INSERT OR REPLACE INTO fees (class, fee_amount, student_id) VALUES (?, ?, NULL)", (class_, fee))
             conn.commit()
             conn.close()
             st.success("Fee set")
@@ -1075,7 +1051,7 @@ def admin_fees():
         fees = load_data('fees')
         if not fees.empty:
             fees['arrears'] = fees['fee_amount'] - fees['paid_amount'].fillna(0)
-            st.dataframe(fees[['student_first_name', 'paid_amount', 'arrears']])
+            st.dataframe(fees[['student_id', 'paid_amount', 'arrears']])
     with tab4:
         if st.button("Generate", key="generate_fees_report"):
             fees = load_data('fees')
@@ -1090,16 +1066,16 @@ def admin_database():
     with tab3: st.dataframe(load_data('non_teaching'))
 # === HEADTEACHER FUNCTIONS ===
 def headteacher_attendance():
-    student_first_name = st.text_input("Student First Name", key="ht_check_att_first_name")
+    student_id = st.number_input("Student ID", min_value=1, step=1, key="ht_check_att_id")
     if st.button("Check", key="ht_check_att_btn"):
         att = load_data('attendance')
-        filtered = att[att['student_first_name'] == student_first_name]
+        filtered = att[att['student_id'] == student_id]
         st.dataframe(filtered) if not filtered.empty else st.info("No records")
 def headteacher_results():
-    student_first_name = st.text_input("Student First Name", key="ht_check_res_first_name")
+    student_id = st.number_input("Student ID", min_value=1, step=1, key="ht_check_res_id")
     if st.button("Check", key="ht_check_res_btn"):
         res = load_data('results')
-        filtered = res[res['student_first_name'] == student_first_name]
+        filtered = res[res['student_id'] == student_id]
         st.dataframe(filtered) if not filtered.empty else st.info("No results")
 def headteacher_teacher_attendance():
     teacher_id = st.number_input("Teacher ID", min_value=1, step=1, key="ht_teacher_att_id")
@@ -1133,29 +1109,29 @@ def headteacher_print_fees():
             fees['arrears'] = fees['fee_amount'] - fees['paid_amount'].fillna(0)
             st.download_button("Download", fees.to_csv(index=False), "fees_report_ht.csv", key="ht_download_fees")
 def headteacher_fee_payment():
-    student_first_name = st.text_input("Student First Name", key="ht_fee_student_first_name")
+    student_id = st.number_input("Student ID", min_value=1, step=1, key="ht_fee_student_id")
     amount = st.number_input("Amount", min_value=0.0, step=0.01, key="ht_fee_amount")
     collected_by = st.text_input("Collected By", key="ht_fee_collected")
     if st.button("Record", key="ht_fee_record_btn"):
         students = load_data('students')
-        if student_first_name not in students['first_name'].values:
+        if student_id not in students['id'].values:
             st.error("Student not found")
             return
-        class_ = students[students['first_name'] == student_first_name]['class'].values[0]
+        class_ = students[students['id'] == student_id]['class'].values[0]
         fees_data = load_data('fees')
-        fee_row = fees_data[(fees_data['class'] == class_) & (fees_data['student_first_name'] == student_first_name)]
+        fee_row = fees_data[(fees_data['class'] == class_) & (fees_data['student_id'] == student_id)]
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
         if fee_row.empty:
             # Create if not exists
-            class_fee = fees_data[(fees_data['class'] == class_) & fees_data['student_first_name'].isna()]
+            class_fee = fees_data[(fees_data['class'] == class_) & fees_data['student_id'].isna()]
             fee_amount = class_fee['fee_amount'].values[0] if not class_fee.empty else 0
-            cursor.execute("INSERT INTO fees (class, fee_amount, student_first_name, paid_amount, date_paid, collected_by) VALUES (?, ?, ?, ?, ?, ?)",
-                           (class_, fee_amount, student_first_name, amount, datetime.now().date(), collected_by))
+            cursor.execute("INSERT INTO fees (class, fee_amount, student_id, paid_amount, date_paid, collected_by) VALUES (?, ?, ?, ?, ?, ?)",
+                           (class_, fee_amount, student_id, amount, datetime.now().date(), collected_by))
         else:
             current_paid = fee_row['paid_amount'].values[0]
-            cursor.execute("UPDATE fees SET paid_amount = ?, date_paid = ?, collected_by = ? WHERE class = ? AND student_first_name = ?",
-                           (current_paid + amount, datetime.now().date(), collected_by, class_, student_first_name))
+            cursor.execute("UPDATE fees SET paid_amount = ?, date_paid = ?, collected_by = ? WHERE class = ? AND student_id = ?",
+                           (current_paid + amount, datetime.now().date(), collected_by, class_, student_id))
         conn.commit()
         conn.close()
         st.success("Payment recorded")
@@ -1165,7 +1141,7 @@ def headteacher_add_class():
     if st.button("Add", key="ht_add_class_btn"):
         conn = sqlite3.connect(DATABASE)
         cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO fees (class, fee_amount, student_first_name) VALUES (?, ?, NULL)", (class_, fee))
+        cursor.execute("INSERT OR REPLACE INTO fees (class, fee_amount, student_id) VALUES (?, ?, NULL)", (class_, fee))
         conn.commit()
         conn.close()
         st.success("Class fee added")
@@ -1215,20 +1191,20 @@ def headteacher_bulk_teacher_attendance():
 def headteacher_bulk_student_attendance():
     students = load_data('students')
     if not students.empty:
-        student_options = [f"{row['full_name']} (FN: {row['first_name']})" for _, row in students.iterrows()]
+        student_options = [f"{row['full_name']} (ID: {row['id']})" for _, row in students.iterrows()]
         selected = st.multiselect("Select Students", student_options, key="ht_bulk_student_select")
         present = st.checkbox("Present", key="ht_bulk_student_present")
         if st.button("Mark All", key="ht_bulk_student_btn"):
             if selected:
-                selected_first_names = [s.split("FN: ")[1][:-1] for s in selected]
+                selected_ids = [int(s.split("ID: ")[1][:-1]) for s in selected]
                 conn = sqlite3.connect(DATABASE)
                 cursor = conn.cursor()
                 date = datetime.now().date()
-                for fn in selected_first_names:
-                    cursor.execute("INSERT OR IGNORE INTO attendance VALUES (?, ?, ?)", (date, fn, present))
+                for sid in selected_ids:
+                    cursor.execute("INSERT OR IGNORE INTO attendance VALUES (?, ?, ?)", (date, sid, present))
                 conn.commit()
                 conn.close()
-                st.success(f"Marked {len(selected_first_names)} students")
+                st.success(f"Marked {len(selected_ids)} students")
             else:
                 st.error("Select at least one student")
 def headteacher_bulk_class_attendance():
@@ -1236,13 +1212,13 @@ def headteacher_bulk_class_attendance():
     present = st.checkbox("Present", key="ht_bulk_class_present")
     if st.button("Mark Class", key="ht_bulk_class_btn"):
         students = load_data('students')
-        class_students = students[students['class'] == class_]['first_name'].tolist()
+        class_students = students[students['class'] == class_]['id'].tolist()
         if class_students:
             conn = sqlite3.connect(DATABASE)
             cursor = conn.cursor()
             date = datetime.now().date()
-            for fn in class_students:
-                cursor.execute("INSERT OR IGNORE INTO attendance VALUES (?, ?, ?)", (date, fn, present))
+            for sid in class_students:
+                cursor.execute("INSERT OR IGNORE INTO attendance VALUES (?, ?, ?)", (date, sid, present))
             conn.commit()
             conn.close()
             st.success(f"Marked {len(class_students)} students in {class_}")
@@ -1255,7 +1231,7 @@ def headteacher_summary_reports():
     if not attendance.empty and not students.empty:
         today = datetime.now().date()
         today_att = attendance[attendance['date'] == today]
-        present_count = today_att[today_att['present'] == True].shape[0]
+        present_count = today_att[today_att['present'] == 1].shape[0] # BOOLEAN as 1/0
         total_students = len(students)
         st.metric("Present Students Today", present_count, delta=present_count - total_students)
         st.dataframe(today_att)
@@ -1290,25 +1266,25 @@ def teacher_ui():
             else:
                 st.error("Report content required")
     with tab3:
-        student_first_name = st.text_input("Student First Name", key="teacher_att_student_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="teacher_att_student_id")
         present = st.checkbox("Present", key="teacher_att_present")
         if st.button("Mark", key="teacher_mark_att_btn"):
             conn = sqlite3.connect(DATABASE)
             cursor = conn.cursor()
             date = datetime.now().date()
-            cursor.execute("INSERT OR IGNORE INTO attendance VALUES (?, ?, ?)", (date, student_first_name, present))
+            cursor.execute("INSERT OR IGNORE INTO attendance VALUES (?, ?, ?)", (date, student_id, present))
             conn.commit()
             conn.close()
             st.success("Attendance marked")
     with tab4:
-        student_first_name = st.text_input("Student First Name", key="teacher_result_student_first_name")
+        student_id = st.number_input("Student ID", min_value=1, step=1, key="teacher_result_student_id")
         subject = st.text_input("Subject", key="teacher_result_subject")
         score = st.number_input("Score", min_value=0, max_value=100, step=1, key="teacher_result_score")
         if st.button("Add", key="teacher_add_result_btn"):
             if is_valid_subject(subject):
                 conn = sqlite3.connect(DATABASE)
                 cursor = conn.cursor()
-                cursor.execute("INSERT OR REPLACE INTO results VALUES (?, ?, ?)", (student_first_name, subject.strip(), score))
+                cursor.execute("INSERT OR REPLACE INTO results VALUES (?, ?, ?)", (student_id, subject.strip(), score))
                 conn.commit()
                 conn.close()
                 st.success("Result added")
