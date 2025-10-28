@@ -8,7 +8,7 @@ import os
 import shutil
 # === CONFIG ===
 DATABASE = 'school.db'
-IMAGE_PATH = r"C:\Users\USER\Desktop\sms"
+IMAGE_PATH = r"C:\Users\USER\Desktop\D.O.BOADU- EDU-COMPLEX"
 PHOTO_FOLDER = 'student_photos'
 # === IMAGE ENCODER ===
 def get_base64_image(image_path):
@@ -1315,4 +1315,5 @@ def teacher_ui():
             else:
                 st.error("Invalid subject")
 if __name__ == "__main__":
+
     main()
