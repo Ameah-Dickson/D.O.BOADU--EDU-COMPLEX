@@ -8,7 +8,7 @@ import os
 import shutil
 # === CONFIG ===
 DATABASE = 'school.db'
-IMAGE_PATH = r"C:\Users\USER\Desktop\D.O.BOADU- EDU-COMPLEX"
+IMAGE_PATH = r"C:\Users\ameah\Desktop\app host\xschool"
 PHOTO_FOLDER = 'student_photos'
 # === IMAGE ENCODER ===
 def get_base64_image(image_path):
